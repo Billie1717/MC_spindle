@@ -14,9 +14,13 @@
 #define WRITE_CONF 1 //5000
 
 int seed;
-double alpha;
-double beta;
+double alpha_gtp;
+double alpha_gdp;
+double beta_gtp;
+double beta_gdp;
 double r_nuc;
+double k_on;
+double k_off;
 int counter;
 int N_max;
 int N_init;
@@ -42,6 +46,7 @@ typedef struct{
   double phi;
   int fil;
   int tip;
+  int type; //type 0 is GTP-bound, type 1 is GDP-bound
  // int start;
   int Nverl;
 } PARTICLE;
@@ -71,8 +76,9 @@ int Interaction_antparINFO(int);
 int Annihilate(int);
 void add_mon(void);
 int find_tip(int);
+int find_behindtip(int);
 void MC_fil(int, int);
-void MC_branch(int);
+void MC_nuc(int);
 void painter(void);
 double magnitude(double,double,double);
 double normalRandom(double, double);
@@ -93,14 +99,13 @@ main(int argc, char* argv[]){
 //SpindDist = 25.;
   //Pbr0 = 0.1;//0.1; //0.001;
   D = 10;
-  in0=fopen("in.ves3d","r");
-  fscanf(in0,"%lf %lf %lf %lf %lf %lf %lf %lf %d\n",&alpha,&beta,&r_nuc,&Pbr0,&SpindDist,&r_circ,&r_cut,&antangle,&seed); 
-  printf("Parameters alpha:%lf beta:%lf rnuc:%lf Pbr0:%lf SpindDist:%lf rcirc:%lf rcut:%lf angle:%lf seed:%d\n",alpha,beta,r_nuc,Pbr0,SpindDist,r_circ,r_cut,antangle,seed); 
+  in0=fopen("in.MC3D","r");
+  fscanf(in0,"%lf %lf %lf %lf %lf %lf %lf %lf %lf %lf %lf %lf %d\n",&alpha_gtp,&alpha_gdp,&beta_gtp,&beta_gdp,&r_nuc,&k_on,&k_off,&Pbr0,&SpindDist,&r_circ,&r_cut,&antangle,&seed); 
+  printf("Parameters alpha_gtp:%lf alpha_gdp:%lf beta_gtp:%lf beta_gdp:%lf rnuc:%lf k_on:%lf k_off:%lf Pbr0:%lf SpindDist:%lf rcirc:%lf rcut:%lf angle:%lf seed:%d\n",alpha_gtp, alpha_gdp, beta_gtp, beta_gdp, r_nuc, k_on, k_off, Pbr0, SpindDist, r_circ, r_cut, antangle, seed); 
   set_all();
-  
    for (i=1;i<=MCSTEPS;i++){painter(); //This is where the loop is {{if (j==S.Nfil)printf("Nfils: %d, Ns: %d \n",S.Nfil, S.N);}
    for (j=1;j<=S.Nfil;j++) {rnad = drand48();MC_fil(1+(int)(rnad*S.Nfil), i);} //pick a random filament printf("Filament %d",1+(int)(drand48()*S.Nfil));
-   for (kk=1;kk<=S.N;kk++) {MC_branch(1+(int)(drand48()*S.N));} //pick a random bead
+   for (kk=1;kk<=S.N;kk++) {MC_nuc(1+(int)(drand48()*S.N));} //pick a random bead
        //N is keeping track of how many particles are in our system
     //if (i == 1 || i%WRITE_CONF==1 ) {painter();} //&& i>10
   }
@@ -132,13 +137,11 @@ void set_all(void){
       if (t > 4){
           Elem[t].theta = 0;
           Elem[t].phi = (M_PI)*(t-5);}
-      //printf("t: %d, phi: %.1f, theta: %.1f",t, Elem[t].theta, Elem[t].phi);
       Elem[t].x = r_circ*cos(Elem[t].theta)*sin(Elem[t].phi)-SpindDist/2;
       Elem[t].y = r_circ*sin(Elem[t].theta)*sin(Elem[t].phi);
       Elem[t].z = r_circ*cos(Elem[t].phi);
       Elem[t].tip = 1; //start with all being tips
-      //Elem[t].start = 1; //start with them all being starts
-      //S.Ntips+=1;
+      Elem[t].type = 0; //start with all being GTP-bound
       Fil[Elem[t].fil].number = 1; //the number of particles in filament 'Elem[t].fil'
   }
   for (t=N_init+1;t<=N_init*2;t++){ 
@@ -149,120 +152,147 @@ void set_all(void){
           Elem[t].theta = 0;
           Elem[t].phi = (M_PI)*(t-11);}
       Elem[t].fil = t; //we start with N_init separate filaments
-      //Elem[t].theta = (2*M_PI/dN_init)*t; //with polarity between 0 and 2pi
       Elem[t].x = r_circ*cos(Elem[t].theta)*sin(Elem[t].phi)+SpindDist/2;
       Elem[t].y = r_circ*sin(Elem[t].theta)*sin(Elem[t].phi);
       Elem[t].z = r_circ*cos(Elem[t].phi);
       Elem[t].tip = 1; //start with all being tips
-      //Elem[t].start = 1; //start with them all being starts
-      //S.Ntips+=1;
+      Elem[t].type = 0; //start with all being GTP-bound
       Fil[Elem[t].fil].number = 1; //the number of particles in filament 'Elem[t].fil'
   }
-  //S.Nfil = t;
 	
 }
 
 /*---------------------------*/  
 void MC_fil(int ff, int MCstep){
   int tt,nn,nnn,nnnn, touch;
-  double newtheta, newphi;
   double mu, sigma, rrr, rr;
-  double s;
+  double alpha, beta, k, kTot;
+  int anfil;
   int touchAntPar;
   int h;
+  int Move;
+  int newtip;
+  int j;
   counter = 0;
-  rrr = drand48();
-  rr = drand48();
+  rrr = drand48(); //used for deciding on trial move
+  rr = drand48(); //used for acceptance probabilities
   nn = S.N+1; //the new counter atom 
   tt = find_tip(ff);
-  
+  //'filament ff is not the correct label (!) 
+  //
     
 
   if (abs(Fil[ff].number)>3000){
     printf("Filament blown up in MC_fil ff %d, is size %d",ff,Fil[ff].number);exit(-1);}
   if (tt==0){
     printf("Not found tip  =  %d,  %d",Elem[tt].fil,ff);return;}//exit(-1);}
- 
-  touchAntPar=Interaction_antpar(tt);
-      if (touchAntPar > 0){
-          //printf("got here, antipar destroy. ");
-          //if (Elem[tt].x>SpindDist){
-             // h = Fil[Elem[tt].fil].number-1; // height of cylinder in units of steps
-  //Fil[Elem[nn].fil].number =2
-              //x1 = Elem[tt].x-h*cos(Elem[tt].theta)*sin(Elem[tt].phi); //getting the other end of the filament coords
-              //y1 = Elem[tt].y-h*sin(Elem[tt].theta)*sin(Elem[tt].phi);
-              //z1 = Elem[tt].z-h*cos(Elem[tt].phi);
-              //theta1 = fmod(Elem[tt].theta*(180./M_PI),360.);
-              //phi1 = fmod(Elem[tt].phi*(180./M_PI),360.);
-              //Interaction_antparINFO(tt);
-            //  printf("tip %d filament %d with x,y,z: %.1f, %.1f, %.1f, theta,phi: %.1f, %.1f, h: %d \n",tt, Elem[tt].fil, Elem[tt].x, Elem[tt].y, Elem[tt].z, Elem[tt].theta, Elem[tt].phi, h);
-             // printf("ALT tip %d filament %d with x,y,z: %.1f, %.1f, %.1f, theta,phi: %.1f, %.1f, h: %d \n",tt, Elem[tt].fil, Elem[tt].x, Elem[tt].y, Elem[tt].z, Elem[tt].theta, Elem[tt].phi, h);
-            //  printf("end with x,y,z: %.1f, %.1f, %.1f \n",Elem[tt].x-h*cos(Elem[tt].theta)*sin(Elem[tt].phi), Elem[tt].y-h*sin(Elem[tt].theta)*sin(Elem[tt].phi), Elem[tt].z-h*cos(Elem[tt].phi));
-             // exit(-1);}
-          //printf("got to antipar annhiliation");
-          //if (ff == 897){printf("fil to blow anti parallel anhiliated and is size = %d, num fils: %d\n",Fil[ff].number,S.Nfil);}
-          Annihilate(ff);Annihilate(Elem[touchAntPar].fil);return;}
-  if (rrr<(r_nuc/(r_nuc+alpha+beta))){ //nucleation
-      newtheta = drand48()*(2*M_PI); //at the moment, just picking a random angle between 0 and 2pi
-      newphi  = drand48()*(M_PI);
-      
-      
-      if (rr>0.5){
-          s = -1;}
-      if (rr<0.5){
-          s = 1;}
-
-      Elem[nn].x = r_circ*cos(newtheta)*sin(newphi)+s*SpindDist/2;
-      Elem[nn].y = r_circ*sin(newtheta)*sin(newphi);
-      Elem[nn].z = r_circ*cos(newphi);
-
-      touch=Interaction_1p(nn);
-      if (touch!=1){  // accept
-      //Elem[nn].x = r_circ*cos(newtheta);
-      //Elem[nn].y = r_circ*sin(newtheta);
-      //Elem[nn].z = 0;
-      Elem[nn].fil =  S.Nfil+1; //making new filament
-      //if (ff == 897){printf("fil 897 nucleated and is size = %d, num fils: %d\n",Fil[ff].number,S.Nfil);}
-      //if (ff == 55){printf("fil 55 nucleated and is size = %d, num fils: %d\n",Fil[ff].number,S.Nfil);}
-      Elem[nn].theta = newtheta;
-      Elem[nn].phi = newphi;
-      Elem[nn].tip = 1;
+  if (S.Ntips==0){
+    printf("No tips left");exit(-1);}
   
-      
-      Fil[Elem[nn].fil].number =1; //the number of particles in this new filament is 1
-      S.Ntips+=1;
-      S.N =S.N+1;
-      S.Nfil +=1;
-      }
-      }     
-  if (rrr>(r_nuc/(r_nuc+alpha+beta)) && rrr<((alpha+r_nuc)/(alpha+beta+r_nuc))){ //adding one monomer to the filament
+  //touchAntPar=Interaction_antpar(tt);
+      //if (touchAntPar > 0){
+        
+         // Annihilate(ff);Annihilate(Elem[touchAntPar].fil);return;}
+  
+
+  if (Elem[tt].type == 0){alpha = alpha_gtp; beta = beta_gtp;} //kon goes from state gdp to gtp 
+  if (Elem[tt].type == 1){alpha = alpha_gdp; beta = beta_gdp;}
+  
+  if (rr < 0.333){Move = 0;} //trial move is adding 1 monomer
+  if (rr > 0.333 && rr < 0.666){Move = 1;} //trial move is removing 1 monomer
+  if (rr > 0.666){Move = 2;} //trial move is switching states
+    
+
+  if (Move == 0){ //adding one monomer to the filament
+      //printf("Got here 1 with fil =  %d, tip = %d",Elem[tt].fil,tt);
       Elem[nn].x = Elem[tt].x+step*cos(Elem[tt].theta)*sin(Elem[tt].phi);
       Elem[nn].y = Elem[tt].y+step*sin(Elem[tt].theta)*sin(Elem[tt].phi);
       Elem[nn].z = Elem[tt].z+step*cos(Elem[tt].phi);
-      touch=Interaction_1p(nn); //=Interaction_alpha(nn); 
-      if (touch != 1){
+      touch=Interaction_1p(nn); 
+      if (touch != 1){ //reject if there is overlap
+      //accept with probabilty:
+      if (drand48() < alpha/beta){ //equivalent to asking: is random < exp(-kBT(En(new)-En(old)) (we reject in this case)
+      
       //if (ff == 897){printf("fil to blow elongated and is size = %d, num fils: %d\n",Fil[ff].number,S.Nfil);}
       Elem[nn].fil =  Elem[tt].fil;
       Elem[nn].theta = Elem[tt].theta;
       Elem[nn].phi = Elem[tt].phi;
       Elem[nn].tip = 1;
+      Elem[nn].type = 0;
       Elem[tt].tip = 0;
+      Elem[tt].type = 0;
       S.N += 1;
       
       Fil[Elem[tt].fil].number+=1;
           }
+      }
       } 
       //return ;
-  if (rrr>(alpha+r_nuc)/(alpha+beta+r_nuc)) {
-      //if (ff == 897){printf("fil to blow anhiliated and is size = %d, num fils: %d\n",Fil[ff].number,S.Nfil);}
-      //if (MCstep >=86){
-         // counter+=1;}
-      Annihilate(ff);
+  if (Move == 1) { //taking 1 monomer from the filament end
+      //printf("Got here 2 with fil =  %d, tip = %d",Elem[tt].fil,tt);//exit(-1);}
+      if (drand48() < beta/alpha){
+          anfil = Elem[tt].fil;
+          if (Fil[anfil].number > 1){ //assign new tip if this is not that last monomer in the filament
+          newtip = find_behindtip(tt);
+          //Fil[Elem[newtip].fil].number = Fil[Elem[newtip].fil].number - 1;
+          if (newtip==0){
+            printf("Not found tip behind =  %d,  %d",Elem[tt].fil,ff);return;} //exit(-1);}
+          Elem[newtip].tip = 1;
+          Elem[newtip].type = Elem[tt].type;
+          
+          }
+          
+          
+          
+          if (tt != S.N){
+          
+          Elem[tt].x=Elem[S.N].x; //put last index (S.N) into position tt to get rid of that monomer
+          Elem[tt].y=Elem[S.N].y;
+          Elem[tt].z=Elem[S.N].z;
+          Elem[tt].fil=Elem[S.N].fil;
+          Elem[tt].theta=Elem[S.N].theta;
+          Elem[tt].phi=Elem[S.N].phi;
+          Elem[tt].tip=Elem[S.N].tip;
+          Elem[tt].type=Elem[S.N].type;
+          }
+          if (Fil[anfil].number > 1){
+              Fil[Elem[newtip].fil].number = Fil[Elem[newtip].fil].number - 1;}
+          else{
+          if (Fil[anfil].number <= 1){
+              for (j=1;j<=S.N;j++){
+                  if (Elem[j].fil == S.Nfil){ //replacing the beads in the last index filament with the index of the one that's just been destroyed
+                      Elem[j].fil = anfil;
+                      Fil[anfil].number = Fil[S.Nfil].number;
+                  }
+              }
+              S.Nfil = S.Nfil - 1;
+              S.Ntips = S.Ntips - 1;
+          }
+          }
+          
+          //need to find the monomer that's just behind this one and make it a tip
+          S.N =S.N-1;
+          
+
+          //Fil[Elem[newtip].fil].number = Fil[Elem[newtip].fil].number - 1;
+      //Annihilate(ff);
   }
-  //if (rrr<(alpha+r_nuc)/(alpha+beta+r_nuc)) {
-  
-      
-  //}
+  }
+    
+  if (Move == 2) { //switching states of the tip
+      //printf("Got here 3 with fil =  %d, tip = %d",Elem[tt].fil,tt);
+      if (Elem[tt].type == 0){
+            if (drand48() < k_off/k_on){
+                Elem[tt].type = 1;
+            }
+      }
+      if (Elem[tt].type == 1){
+            if (drand48() < k_on/k_off){
+                Elem[tt].type = 0;
+            }
+      }
+  }
+
  
     
   if (fabs(Elem[nn].x)>L){
@@ -274,25 +304,72 @@ void MC_fil(int ff, int MCstep){
 return ;
 }
 
-void MC_branch(int oo){
-  int nn,nnn,touch,rr;
+void MC_nuc(int oo){
+  int nn,nnn,touch;
+  double rr,rrr,r_acc;
   double distCentre,newtheta1, newphi1;
+  double newtheta, newphi;
   double Pbranch;
+  double s;
   double normrand, normrand2;
   double mu, sigma;
   double minAng;
+  int Move;
   nn = S.N+1; //the new counter atom
   nnn = S.N+2;
+  rrr = drand48();
+  r_acc = drand48();
+  rr = drand48();
+    
   if (abs(Fil[Elem[oo].fil].number)>3000){
     printf("Filament blown up in MC_branch oo %d, is size %d",oo,Fil[Elem[oo].fil].number);exit(-1);}
   if (Elem[oo].x<0){
       distCentre  = sqrt((Elem[oo].x+SpindDist/2)*(Elem[oo].x+SpindDist/2)+Elem[oo].y*Elem[oo].y+Elem[oo].z*Elem[oo].z);}
   if (Elem[oo].x>0){
       distCentre  = sqrt((Elem[oo].x-SpindDist/2)*(Elem[oo].x-SpindDist/2)+Elem[oo].y*Elem[oo].y+Elem[oo].z*Elem[oo].z);}
-  Pbranch = Pbr0*0.3; //*exp(-distCentre/D);
-  //printf("branching at oo, %d Elem[oo].tip %d",oo,Elem[oo].tip);
+  Pbranch = Pbr0*0.3; //*exp(-distCentre/D); ---------- Here is where I implement the nucleation diffusion 
+    
+    
+  if (rrr > 0.5){Move = 0;} //trial nucleation move
+  if (rrr < 0.5){Move = 1;} //trial branching move
+    
+  if (Move == 0){ //trial nucleation from centre
+      //printf("Got here 4 with fil =  %d, elem = %d",Elem[oo].fil,oo);//exit(-1);}
+      newtheta = drand48()*(2*M_PI); //at the moment, just picking a random angle between 0 and 2pi
+      newphi  = drand48()*(M_PI);
+      if (rr>0.5){
+          s = -1;}
+      if (rr<0.5){
+          s = 1;}
+
+      Elem[nn].x = r_circ*cos(newtheta)*sin(newphi)+(s*SpindDist/2);
+      Elem[nn].y = r_circ*sin(newtheta)*sin(newphi);
+      Elem[nn].z = r_circ*cos(newphi);
+
+      touch=Interaction_1p(nn);
+      if (touch!=1){  // accept
+      if (drand48() < r_nuc){  //assuming we never nucleate into the dgp state
+      Elem[nn].fil =  S.Nfil+1; //making new filament
+      //if (ff == 897){printf("fil 897 nucleated and is size = %d, num fils: %d\n",Fil[ff].number,S.Nfil);}
+      //if (ff == 55){printf("fil 55 nucleated and is size = %d, num fils: %d\n",Fil[ff].number,S.Nfil);}
+      Elem[nn].theta = newtheta;
+      Elem[nn].phi = newphi;
+      Elem[nn].tip = 1;
+      Elem[nn].type = 0;
+
+
+      Fil[Elem[nn].fil].number =1; //the number of particles in this new filament is 1
+      S.Ntips+=1;
+      S.N =S.N+1;
+      S.Nfil +=1;
+      }
+      }
+  }
+    
+  if (Move == 1){
+      //printf("Got here 5 with fil =  %d, elem = %d",Elem[oo].fil,oo);//exit(-1);}
   if (Elem[oo].tip != 1){ //don't branch on a tip
-  if (drand48()<(Pbranch/(1+Pbranch))){
+  if (drand48()<(Pbranch)){
       mu = 0;
       sigma = 0.3;
       rr = drand48();
@@ -334,11 +411,13 @@ void MC_branch(int oo){
       Elem[nn].theta = newtheta1;
       Elem[nn].phi = newphi1;
       Elem[nn].tip = 0;
+      Elem[nn].type = 0;
       
       Elem[nnn].fil =  Elem[nn].fil; //making new filament
       Elem[nnn].theta = Elem[nn].theta;
       Elem[nnn].phi = Elem[nn].phi;
       Elem[nnn].tip = 1;
+      Elem[nnn].type = 0;
      // Elem[nn].start = 1;
       Fil[Elem[nn].fil].number =2; //the number of particles in this new filament is 1 
       //if (Elem[oo].fil == 897){printf("fil to blow as a mother branched and is size = %d, num fils: %d\n",Fil[Elem[oo].fil].number,S.Nfil);}
@@ -350,6 +429,7 @@ void MC_branch(int oo){
       return;
   }
   }
+}
 }
 
 int Interaction_antpar(int tt){ //input is the tip
@@ -397,102 +477,6 @@ int Interaction_antpar(int tt){ //input is the tip
   return 0;
 }
 
-/*int Interaction_antparINFO(int tt){ //input is the tip
-  int j;
-  double x1,y1,z1,cyltouch,x2,y2,z2;
-  double xv,yv,zv;
-  double h;
-  double theta1, theta2, phi1, phi2;
-  double dthet, dphi;
-  h = Fil[Elem[tt].fil].number-1; // height of cylinder in units of steps
-  x1 = Elem[tt].x-h*cos(Elem[tt].theta)*sin(Elem[tt].phi); //getting the other end of the filament coords
-  y1 = Elem[tt].y-h*sin(Elem[tt].theta)*sin(Elem[tt].phi);
-  z1 = Elem[tt].z-h*cos(Elem[tt].phi);
-  xv = Elem[tt].x - x1;
-  yv = Elem[tt].y - y1;
-  zv = Elem[tt].z - z1;
-  
-  theta1 = Elem[tt].theta;
-  phi1 = Elem[tt].phi;
-  theta1 = atan(yv/xv); //fmod(Elem[tt].theta*(180./M_PI),360.);
-  if (xv<0){
-      theta1 = theta1+M_PI;
-      if (yv<0){
-          theta1 = theta1+M_PI;
-      }
-  }
-  if (theta1<0){
-      theta1 = theta1+M_PI*2;}
-  if (theta1>M_PI*2){
-      theta1 = theta1-M_PI*2;}
-  if (phi1<0){
-      phi1 = phi1+M_PI;}
-  if (phi1>M_PI){
-      phi1 = phi1-M_PI;}
-    
-    
-  theta1 = theta1 * (180/M_PI);
-  phi1 =  acos(zv/h)*180/M_PI;  //fmod(Elem[tt].phi*(180./M_PI),360.);
-      
-  for (j=1;j<=S.N;j++){ //Elem[k].Nverl
-      if (Elem[j].fil != Elem[tt].fil){ 
-          
-          h = Fil[Elem[j].fil].number-1; // height of cylinder in units of steps
-  //Fil[Elem[nn].fil].number =2
-          x2 = Elem[j].x-h*cos(Elem[j].theta)*sin(Elem[j].phi); //getting the other end of the filament coords
-          y2 = Elem[j].y-h*sin(Elem[j].theta)*sin(Elem[j].phi);
-          z2 = Elem[j].z-h*cos(Elem[j].phi);
-          xv = Elem[j].x - x1;
-          yv = Elem[j].y - y1;
-          zv = Elem[j].z - z1;
-          
-          theta2 = atan(yv/xv); //fmod(Elem[tt].theta*(180./M_PI),360.);
-          if (xv<0){
-              theta2 = theta2+M_PI;
-              if (yv<0){
-                  theta2 = theta2+M_PI;
-              }
-          }
-          if (theta2<0){
-              theta2 = theta2+M_PI*2;}
-          if (theta2>M_PI*2){
-              theta2 = theta2-M_PI*2;}
-          if (phi2<0){
-              phi2 = phi2+M_PI;}
-          if (phi2>M_PI){
-              phi2 = phi2-M_PI;}
-          
-          theta2 = theta2 * (180/M_PI);
-          phi2 =  acos(zv/h)*180/M_PI;  //fmod(Elem[tt].phi*(180./M_PI),360.);
-          
-          
-          theta2 = Elem[j].theta;
-          phi2 = Elem[j].phi;
-          dthet = fabs(theta1-theta2)*(180/M_PI);
-          dphi = fabs(phi1-phi2)*(180/M_PI);
-          if (dthet >180){
-              dthet  = 360 - dthet;}
-          
-          //dthet = fabs(fmod(theta1-theta2,360));
-          //dphi = fabs(fmod(theta1-theta2,360));
-          if (dthet > antangle){
-              if (dphi > antangle/2){
-              
-                cyltouch = liesInCylinder(Elem[tt].x,Elem[tt].y,Elem[tt].z,x1,y1,z1,Elem[j].x,Elem[j].y,Elem[j].z);
-                if (cyltouch == 1){
-                    printf("INSIDE tip %d filament %d theta,phi: %.1f, %.1f, ALT theta,phi: %.1f, %.1f  \n",tt, Elem[tt].fil, Elem[tt].theta*(180/M_PI), Elem[tt].phi*(180/M_PI),theta1, phi1);
-                    printf("INSIDE crossed %d filament %d theta,phi: %.1f, %.1f,ALT theta,phi: %.1f, %.1f  \n",j, Elem[j].fil, Elem[j].theta*(180/M_PI), Elem[j].phi*(180/M_PI), theta2, phi2);
-
-                 return 1;  // contact-reject
-              }
-              }
-          }
-      }
-       
-  }  
-
-  return 0;
-}*/
 
 
 int Interaction_1p(int k){
@@ -513,25 +497,6 @@ int Interaction_1p(int k){
 
   return 0;
 }
-
-/*int Interaction_alpha(int k){
-  int j;
-  double dx,dy,dz,r2,rs,dd;
-  
-  for (j=1;j<=S.N;j++){ //regecting the next one along instead of that alpha
-      if (j != k){
-        dx=Elem[k].x+step*cos(Elem[k].theta)-Elem[j].x;
-        dy=Elem[k].y+step*cos(Elem[k].theta)-Elem[j].y;
-        dz=Elem[k].z+step*cos(Elem[k].theta)-Elem[j].z;
-   
-        r2=(dx*dx+ dy*dy+ dz*dz);
-   
-    if (r2<0.99) return 1;  // contact-reject
-      } 
-  }  
-
-  return 0;
-}*/
 
 int Annihilate(int k){
     
@@ -602,7 +567,7 @@ void painter(void){
   FILE *o, *h;
   //printf("S.N: %d, Elem[S.N].x, %.2f, Elem[S.N].y, %.2f\n",S.N, Elem[S.N].x ,Elem[S.N].y) ;
   //printf("S.N-1: %d, Elem[S.N-1].x, %.2f, Elem[S.N-1].y, %.2f\n",S.N-1, Elem[S.N-1].x ,Elem[S.N-1].y) ;
-  sprintf(iiiii,"out3D_CN_Beta_%.2f_Alpha_%.2f_rnuc_%.2f_dSpind_%.2f_rcut_%.2f_antang_%.1f_seed_%d.xyz",beta,alpha,r_nuc, SpindDist, r_cut, antangle,seed);
+  sprintf(iiiii,"MCout3D_BT%.2f_BD%.2f_AT%.2f_AD%.2f_rnuc%.2f_dSpind_%.2f_rcut_%.2f_antang_%.1f_seed_%d.xyz",beta_gtp,beta_gdp,alpha_gtp,alpha_gdp,r_nuc, SpindDist, r_cut, antangle,seed);
 
   o=fopen(iiiii,"a+");
 
@@ -617,9 +582,9 @@ void painter(void){
   // if (p<=S.N) fprintf(o,"%d %f %f %f %f %f %d\n",
 //			     Elem[p].fil,Elem[p].x,Elem[p].y,Elem[p].z,Elem[p].theta,Elem[p].phi,Fil[Elem[p].fil].number);
    // else fprintf(o,"%d %f %f %f %f %f %d\n", Elem[p].fil,Elem[p].x,Elem[p].y,Elem[p].z,Elem[p].theta,Elem[p].phi,Fil[Elem[p].fil].number);
-    if (p<=S.N) fprintf(o," %d %f %f %f %f %f %d %d\n",
-			     Elem[p].fil,Elem[p].x,Elem[p].y,Elem[p].z,Elem[p].theta*180/M_PI,Elem[p].phi*180/M_PI,Fil[Elem[p].fil].number, counter);
-    else fprintf(o," %d %f %f %f %f %f %d %d\n", Elem[p].fil,Elem[p].x,Elem[p].y,Elem[p].z,Elem[p].theta*180/M_PI,Elem[p].phi*180/M_PI,Fil[Elem[p].fil].number, counter);
+    if (p<=S.N) fprintf(o," %d %f %f %f %d %d %d\n",
+			     Elem[p].fil,Elem[p].x,Elem[p].y,Elem[p].z,Fil[Elem[p].fil].number,Elem[p].tip, Elem[p].type);
+    else fprintf(o," %d %f %f %f %d %d %d\n", Elem[p].fil,Elem[p].x,Elem[p].y,Elem[p].z,Fil[Elem[p].fil].number,Elem[p].tip, Elem[p].type);
        
     
   }
@@ -627,7 +592,7 @@ void painter(void){
   fclose(o);
     
     
-  /*sprintf(iiii,"FilNumbers_Beta_%.2f_Alpha_%.2f.dat",beta,alpha);
+  sprintf(iiii,"FilNumbersV2_Beta_%.2f_Alpha_%.2f_rnuc_%.2f_rcirc_%.2f.dat",beta_gtp,alpha_gtp,r_nuc,r_circ);
 
   h=fopen(iiii,"a+");
 
@@ -643,7 +608,7 @@ void painter(void){
     
   }
 
-  fclose(h);*/
+  fclose(h);
 
 }
 
@@ -679,6 +644,22 @@ int find_tip(int ff){
     
     for (b=1;b<=S.N;b++){
         if (Elem[b].fil == ff && Elem[b].tip == 1){
+            return b;}
+    }
+    return 0;
+}
+
+int find_behindtip(int tt){ //input is element which is currently the tip
+    int b;
+    double dx,dy,dz,r2;
+    
+    for (b=1;b<=S.N;b++){
+        dx=Elem[b].x-Elem[tt].x;
+        dy=Elem[b].y-Elem[tt].y;
+        dz=Elem[b].z-Elem[tt].z;
+   
+        r2=(dx*dx+ dy*dy+ dz*dz);
+        if (Elem[b].fil == Elem[tt].fil && b!=tt && r2 < 1.5){
             return b;}
     }
     return 0;

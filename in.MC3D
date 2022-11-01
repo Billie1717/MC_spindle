@@ -1,0 +1,17 @@
+1. 0.0 5. 0 0.9 0. 0. 0 100 15 20.0 120 278
+alpha_gtp
+alpha_gdp
+beta_gtp
+beta_gdp
+r_nuc
+k_on
+k_off
+Pbr0
+Spindle distance
+Circular nucleation radius
+Cut off radius for antiparallel interaction
+minimal angle counting as antiparallel
+seed
+ 
+ 
+ [1.05,1.1,1.2,1.5,2.,10]
